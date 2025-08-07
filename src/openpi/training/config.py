@@ -80,7 +80,7 @@ class DataConfig:
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantile_norm: bool = False
-    tolerance_s: float = 0.001
+    tolerance_s: float = 0.05
 
 
     # Names of keys that will be used by the data loader to generate the action sequence. The length of the
@@ -285,12 +285,14 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation.images.left": "observation.images.left",
-                        "observation.images.right": "observation.images.right",
-                        "observation.images.wrist": "observation.images.wrist",
-                        "observation.state": "observation.state",
-                        "action": "action",
-                        "annotation.human.action.task_description": "annotation.human.action.task_description",
+                        "images": {
+                            "base_0_rgb": "observation.images.left",
+                            "right_wrist_0_rgb": "observation.images.right",
+                            "left_wrist_0_rgb": "observation.images.wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "annotation.human.action.task_description",
                     }
                 )
             ]
@@ -581,8 +583,40 @@ _CONFIGS = [
             assets=AssetsConfig(asset_id="franka",assets_dir="/mnt/data/franka_lerobot_dataset_new"),
             base_config=DataConfig(prompt_from_task=True, 
             action_sequence_keys=("action",),
-            tolerance_s=0.001),
+            tolerance_s=0.05),
         ),  
+    ),
+
+    TrainConfig(
+        name="pi0_franka_low_mem_finetune",
+        # Enable LoRA by specifying LoRA variants for both language (paligemma) and action experts
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",           # or "gemma_2b_lora_fp8" if using FP8
+            action_expert_variant="gemma_300m_lora",
+            action_horizon=10,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="/mnt/data/franka_lerobot_dataset_new",
+            assets=AssetsConfig(
+                asset_id="franka",
+                assets_dir="/mnt/data/franka_lerobot_dataset_new"
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                tolerance_s=0.05
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi0_base/params"
+        ),
+        num_train_steps=30_000,
+        # Freeze base model weights except LoRA adapters
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # Disable EMA for LoRA training
     ),
 
     TrainConfig(

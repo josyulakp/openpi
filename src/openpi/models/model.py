@@ -108,12 +108,16 @@ class Observation(Generic[ArrayT]):
         if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
             raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
         # If images are uint8, convert them to [-1, 1] float32.
-        for key in data["image"]:
-            if data["image"][key].dtype == np.uint8:
-                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+        for key in data["images"]:
+            if data["images"][key].dtype == np.uint8:
+                data["images"][key] = data["images"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+
+        import jax.numpy as jnp
+        data["image_masks"] = {k: jnp.ones(data["images"][key].shape[0], dtype=bool) for k in data["images"]}
+
         return cls(
-            images=data["image"],
-            image_masks=data["image_mask"],
+            images=data["images"],
+            image_masks=data["image_masks"],
             state=data["state"],
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
@@ -153,14 +157,22 @@ def preprocess_observation(
 
     out_images = {}
     for key in image_keys:
-        image = observation.images[key]
+        image = observation.images[key]  # Assume (B, C, H, W)
+
+        # Convert from (B, C, H, W) → (B, H, W, C)
+        if image.ndim == 4 and image.shape[1] == 3:
+            image = image.transpose(0, 2, 3, 1)
+        elif image.ndim == 3 and image.shape[0] == 3:
+            image = image.transpose(1, 2, 0)
+        else:
+            raise ValueError(f"Unexpected image shape: {image.shape} for key {key}")
+
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad(image, *image_resolution)
 
         if train:
-            # Convert from [-1, 1] to [0, 1] for augmax.
-            image = image / 2.0 + 0.5
+            image = image / 2.0 + 0.5  # [-1, 1] → [0, 1]
 
             transforms = []
             if "wrist" not in key:
@@ -176,8 +188,13 @@ def preprocess_observation(
             sub_rngs = jax.random.split(rng, image.shape[0])
             image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)
 
-            # Back to [-1, 1].
-            image = image * 2.0 - 1.0
+            image = image * 2.0 - 1.0  # back to [-1, 1]
+
+        # Convert back to (B, C, H, W)
+        if image.ndim == 4 and image.shape[-1] == 3:
+            image = image.transpose(0, 3, 1, 2)
+        elif image.ndim == 3 and image.shape[-1] == 3:
+            image = image.transpose(2, 0, 1)
 
         out_images[key] = image
 

@@ -194,7 +194,7 @@ def train_step(
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
-
+    print("config", config)
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
@@ -228,9 +228,15 @@ def main(config: _config.TrainConfig):
 
     # Log images from first batch to sanity check.
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        wandb.Image(
+            np.concatenate(
+                [np.transpose(np.array(img[i]), (1, 2, 0)) for img in batch[0].images.values()],  # (C,H,W) → (H,W,C)
+                axis=1,
+            )
+        )
+        for i in range(5)
     ]
+
     wandb.log({"camera_views": images_to_log}, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
@@ -238,7 +244,7 @@ def main(config: _config.TrainConfig):
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
     if resuming:
-        train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loacheck_timestamps_syncder)
+        train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader, train_state.step)
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),

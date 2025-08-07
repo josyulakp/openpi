@@ -11,6 +11,8 @@ from openpi_client import image_tools
 from openpi.models import tokenizer as _tokenizer
 from openpi.shared import array_typing as at
 from openpi.shared import normalize as _normalize
+import torch 
+import json
 
 DataDict: TypeAlias = at.PyTree
 NormStats: TypeAlias = _normalize.NormStats
@@ -19,6 +21,17 @@ NormStats: TypeAlias = _normalize.NormStats
 T = TypeVar("T")
 S = TypeVar("S")
 
+# utils.py or script that loads data
+def load_task_prompts(jsonl_path: str) -> dict[int, str]:
+    task_map = {}
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            entry = json.loads(line)
+            if "episode_index" in entry and "tasks" in entry:
+                task_map[entry["episode_index"]] = entry["tasks"][0]  # assuming 1 task per episode
+    return task_map
+
+task_map = load_task_prompts("/mnt/data/franka_lerobot_dataset_new/meta/episodes.jsonl")
 
 @runtime_checkable
 class DataTransformFn(Protocol):
@@ -180,9 +193,26 @@ class ResizeImages(DataTransformFn):
     width: int
 
     def __call__(self, data: DataDict) -> DataDict:
-        image_keys = ["observation.images.left", "observation.images.right", "observation.images.wrist"]
+        image_keys = data["images"].keys()
         for k in image_keys:
-            data[k] = image_tools.resize_with_pad(data[k].numpy(), self.height, self.width)
+            img = data["images"][k]  # torch.Tensor of shape (C, H, W)
+
+            # Convert to NumPy and channel-last format
+            img_np = img.numpy().transpose(1, 2, 0)  # (H, W, C)
+
+            # Ensure dtype is uint8
+            if img_np.dtype != np.uint8:
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+
+            # Confirm shape before resize
+            assert img_np.ndim == 3 and img_np.shape[2] in [1, 3, 4], f"Invalid image shape: {img_np.shape}"
+
+            # Resize
+            img_resized = image_tools.resize_with_pad(img_np, self.height, self.width)
+
+            # Convert back to torch tensor and channel-first
+            data["images"][k] = torch.from_numpy(img_resized).permute(2, 0, 1)  # back to (C, H, W)
+
         return data
 
 
@@ -249,6 +279,8 @@ class TokenizePrompt(DataTransformFn):
 
         if not isinstance(prompt, str):
             prompt = prompt.item()
+        prompt = task_map[int(prompt)]
+        # print("prompt", prompt, "tokenizer", self.tokenizer)
 
         tokens, token_masks = self.tokenizer.tokenize(prompt)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
@@ -265,7 +297,7 @@ class TokenizeFASTInputs(DataTransformFn):
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        state, actions = data["state"], data.get("actions")
+        state, actions = data["observation.state"], data.get("action")
         tokens, token_mask, ar_mask, loss_mask = self.tokenizer.tokenize(prompt, state, actions)
         return {
             **data,
@@ -286,7 +318,7 @@ class ExtractFASTActions(DataTransformFn):
         if "actions" not in data:
             return data
         # Model outputs are saved in "actions", but for FAST models they represent tokens.
-        tokens = data.pop("actions")
+        tokens = data.pop("action")
         actions = self.tokenizer.extract_actions(tokens.astype(np.int32), self.action_horizon, self.action_dim)
         return {
             **data,
@@ -306,6 +338,7 @@ class PromptFromLeRobotTask(DataTransformFn):
             raise ValueError('Cannot extract prompt without "task_index"')
 
         task_index = int(data["task_index"])
+        # print("task_index", task_index)
         if (prompt := self.tasks.get(task_index)) is None:
             raise ValueError(f"{task_index=} not found in task mapping: {self.tasks}")
 
