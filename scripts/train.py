@@ -132,6 +132,17 @@ def init_train_state(
 
     return train_state, state_sharding
 
+def pad_vector(vector, new_dim):
+    """Pads the last dimension of a vector to `new_dim` with zeros."""
+    current_dim = vector.shape[-1]
+    if current_dim == new_dim:
+        return vector  # OK during tracing
+
+    pad_width = [(0, 0)] * vector.ndim
+    pad_width[-1] = (0, new_dim - current_dim)
+    return jnp.pad(vector, pad_width, mode="constant")
+
+
 
 @at.typecheck
 def train_step(
@@ -141,18 +152,26 @@ def train_step(
     batch: tuple[_model.Observation, _model.Actions],
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
+    # import ipdb; ipdb.set_trace()
+
     model.train()
 
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
+        # import ipdb; ipdb.set_trace()
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
+    # import ipdb; ipdb.set_trace()
+    observation = dataclasses.replace(observation, state=pad_vector(observation.state, 32))
 
+    #pad actions to be 32 by padding additional actions as 0 
+    actions = pad_vector(actions, 32)
+    print("actions shape" , actions.shape)
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
     loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)

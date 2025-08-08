@@ -10,7 +10,7 @@ from openpi.models import model as _model
 def make_libero_example() -> dict:
     """Creates a random input example for the Libero policy."""
     return {
-        "observation/state": np.random.rand(8),
+        "observation/state": np.random.rand(32),
         "observation/left": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
         "observation/right": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
         "observation/wrist": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),

@@ -577,7 +577,7 @@ _CONFIGS = [
 
     TrainConfig(
         name="pi0_franka",
-        model=pi0.Pi0Config(action_horizon=10),
+        model=pi0.Pi0Config(action_horizon=10, action_dim=8),
         data=LeRobotLiberoDataConfig(
             repo_id="/mnt/data/franka_lerobot_dataset_new",
             assets=AssetsConfig(asset_id="franka",assets_dir="/mnt/data/franka_lerobot_dataset_new"),
@@ -594,6 +594,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",           # or "gemma_2b_lora_fp8" if using FP8
             action_expert_variant="gemma_300m_lora",
             action_horizon=10,
+            action_dim=32,
         ),
         data=LeRobotLiberoDataConfig(
             repo_id="/mnt/data/franka_lerobot_dataset_new",
@@ -608,13 +609,14 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi0_base/params"
+            "gs://openpi-assets/checkpoints/pi0_droid/params"
         ),
         num_train_steps=30_000,
         # Freeze base model weights except LoRA adapters
         freeze_filter=pi0.Pi0Config(
             paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora"
+            action_expert_variant="gemma_300m_lora",
+            action_dim=32,
         ).get_freeze_filter(),
         ema_decay=None,  # Disable EMA for LoRA training
     ),
@@ -625,7 +627,7 @@ _CONFIGS = [
         # Here you define the model config -- In this example we use pi0 as the model
         # architecture and perform *full* finetuning. in the examples below we show how to modify
         # this to perform *low-memory* (LORA) finetuning and use pi0-FAST as an alternative architecture.
-        model=pi0.Pi0Config(),
+        model=pi0.Pi0Config(action_horizon=10),
         # Here you define the dataset you are training on. In this example we use the Libero
         # dataset. For your own dataset, you can change the repo_id to point to your dataset.
         # Also modify the DataConfig to use the new config you made for your dataset above.

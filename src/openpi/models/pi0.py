@@ -180,6 +180,9 @@ class Pi0(_model.BaseModel):
         tokens = []
         # embed images
         for name in obs.images:
+            obs.images[name] = einops.rearrange(obs.images[name], "b c h w -> b h w c")
+            print("palligemma images name", name, "shape ", obs.images[name].shape)
+
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
 
             tokens.append(image_tokens)
@@ -213,6 +216,8 @@ class Pi0(_model.BaseModel):
         ar_mask = []
         tokens = []
         # add a single state token
+        # import ipdb; ipdb.set_trace()
+        # print("obs shape " , obs.state.shape )
         state_token = self.state_proj(obs.state)[:, None, :]
         tokens.append(state_token)
         input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
