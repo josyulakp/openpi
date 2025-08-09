@@ -171,7 +171,7 @@ def train_step(
 
     #pad actions to be 32 by padding additional actions as 0 
     actions = pad_vector(actions, 32)
-    print("actions shape" , actions.shape)
+    # print("actions shape" , actions.shape)
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
     loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)

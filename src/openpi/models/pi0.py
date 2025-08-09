@@ -181,7 +181,7 @@ class Pi0(_model.BaseModel):
         # embed images
         for name in obs.images:
             obs.images[name] = einops.rearrange(obs.images[name], "b c h w -> b h w c")
-            print("palligemma images name", name, "shape ", obs.images[name].shape)
+            # print("palligemma images name", name, "shape ", obs.images[name].shape)
 
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
 
