@@ -167,10 +167,11 @@ def train_step(
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
     # import ipdb; ipdb.set_trace()
-    observation = dataclasses.replace(observation, state=pad_vector(observation.state, 32))
+    # Use the model's action dimension from config instead of hardcoding 32
+    observation = dataclasses.replace(observation, state=pad_vector(observation.state, config.model.action_dim))
 
-    #pad actions to be 32 by padding additional actions as 0 
-    actions = pad_vector(actions, 32)
+    # Pad actions to the model's action dimension instead of hardcoding 32
+    actions = pad_vector(actions, config.model.action_dim)
     # print("actions shape" , actions.shape)
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)

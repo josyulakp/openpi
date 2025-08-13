@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import re
-from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import Protocol, TypeAlias, TypeVar, runtime_checkable, Any
 
 import flax.traverse_util as traverse_util
 import jax
@@ -32,6 +32,7 @@ def load_task_prompts(jsonl_path: str) -> dict[int, str]:
     return task_map
 
 task_map = load_task_prompts("/mnt/data/franka_lerobot_dataset_new/meta/episodes.jsonl")
+
 
 @runtime_checkable
 class DataTransformFn(Protocol):
@@ -87,6 +88,20 @@ class CompositeTransform(DataTransformFn):
 def compose(transforms: Sequence[DataTransformFn]) -> DataTransformFn:
     """Compose a sequence of transforms into a single transform."""
     return CompositeTransform(transforms)
+
+
+@dataclasses.dataclass(frozen=True)
+class EnsureActionKey(DataTransformFn):
+    """Make sure downstream transforms see an 'action' key."""
+    def __call__(self, data: Any) -> dict:
+        # Model might return a bare array
+        if isinstance(data, (np.ndarray, jnp.ndarray)):
+            return {"action": data}
+        # Or a dict with 'actions' but not 'action'
+        if isinstance(data, dict) and "action" not in data and "actions" in data:
+            return {**data, "action": data["actions"]}
+        # Already good
+        return data
 
 
 @dataclasses.dataclass(frozen=True)
@@ -177,14 +192,43 @@ class Unnormalize(DataTransformFn):
             self._unnormalize_quantile if self.use_quantiles else self._unnormalize,
             strict=True,
         )
-
     def _unnormalize(self, x, stats: NormStats):
-        return x * (stats.std + 1e-6) + stats.mean
+        print("stats.std shape ", stats.std.shape)
+        print("x shape ", x.shape)
+        print("stats.mean shape ", stats.mean.shape)
+
+        d_target = x.shape[-1]        # final dim (e.g., 32)
+        d_stats = stats.mean.shape[0] # original dim (e.g., 8)
+
+        if d_stats < d_target:
+            # Pad mean and std to match the target shape
+            mean_padded = np.zeros(d_target, dtype=stats.mean.dtype)
+            std_padded = np.ones(d_target, dtype=stats.std.dtype)
+
+            mean_padded[:d_stats] = stats.mean
+            std_padded[:d_stats] = stats.std
+        else:
+            # Already matches
+            mean_padded = stats.mean
+            std_padded = stats.std
+
+        return x * (std_padded + 1e-6) + mean_padded
 
     def _unnormalize_quantile(self, x, stats: NormStats):
         assert stats.q01 is not None
         assert stats.q99 is not None
         return (x + 1.0) / 2.0 * (stats.q99 - stats.q01 + 1e-6) + stats.q01
+
+
+import dataclasses
+from typing import Any
+
+import numpy as np
+import torch
+import jax
+import jax.numpy as jnp
+
+from openpi_client import image_tools  # or wherever your resize_with_pad lives
 
 
 @dataclasses.dataclass(frozen=True)
@@ -193,27 +237,95 @@ class ResizeImages(DataTransformFn):
     width: int
 
     def __call__(self, data: DataDict) -> DataDict:
-        image_keys = data["images"].keys()
-        for k in image_keys:
-            img = data["images"][k]  # torch.Tensor of shape (C, H, W)
+        # iterate over a snapshot of keys since we mutate values
+        for k in list(data["images"].keys()):
+            img = data["images"][k]
+            # print("SHAPE", img.shape)
+            backend = self._detect_backend(img)
 
-            # Convert to NumPy and channel-last format
-            img_np = img.numpy().transpose(1, 2, 0)  # (H, W, C)
+            # ---- to numpy, channel-last (H, W, C) ----
+            img_np = self._to_numpy_chlast(img)
 
-            # Ensure dtype is uint8
-            if img_np.dtype != np.uint8:
-                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+            # ensure uint8 (handles float in [0,1] or [-1,1] or arbitrary)
+            img_np = self._ensure_uint8(img_np)
 
-            # Confirm shape before resize
-            assert img_np.ndim == 3 and img_np.shape[2] in [1, 3, 4], f"Invalid image shape: {img_np.shape}"
+            # sanity
+            if not (img_np.ndim == 3 and img_np.shape[2] in (1, 3, 4)):
+                raise ValueError(f"Invalid image shape for '{k}': {img_np.shape} (expected HxWx{1|3|4})")
 
-            # Resize
+            # ---- resize (H, W, C) -> (height, width, C) ----
             img_resized = image_tools.resize_with_pad(img_np, self.height, self.width)
 
-            # Convert back to torch tensor and channel-first
-            data["images"][k] = torch.from_numpy(img_resized).permute(2, 0, 1)  # back to (C, H, W)
+            # ---- back to original backend, channel-first (C, H, W), keep uint8 ----
+            data["images"][k] = self._from_numpy_cfirst(img_resized, backend)
 
         return data
+
+    # ---------------- helpers ----------------
+
+    def _detect_backend(self, x: Any) -> str:
+        if isinstance(x, torch.Tensor):
+            return "torch"
+        if isinstance(x, jax.Array):
+            return "jax"
+        if isinstance(x, np.ndarray):
+            return "numpy"
+        # some projects pass Python lists; promote to numpy
+        if isinstance(x, (list, tuple)):
+            return "numpy"
+        raise TypeError(f"Unsupported image type: {type(x)}")
+
+    def _to_numpy_chlast(self, x: Any) -> np.ndarray:
+        """Return NumPy array in (H, W, C)."""
+        if isinstance(x, torch.Tensor):
+            arr = x.detach().cpu().numpy()
+        elif isinstance(x, jax.Array):
+            arr = np.array(x)  # copies to host
+        elif isinstance(x, np.ndarray):
+            arr = x
+        else:
+            arr = np.asarray(x)
+
+        if arr.ndim == 3:
+            # If channel-first (C,H,W) with standard C
+            if arr.shape[0] in (1, 3, 4) and (arr.shape[1] != self.height or arr.shape[2] != self.width or True):
+                arr = np.transpose(arr, (1, 2, 0))
+            # else assume already (H, W, C)
+        elif arr.ndim == 2:
+            # grayscale HxW -> HxWx1
+            arr = arr[:, :, None]
+        else:
+            raise ValueError(f"Unsupported image ndim: {arr.ndim}")
+        return arr
+
+    def _ensure_uint8(self, img: np.ndarray) -> np.ndarray:
+        if img.dtype == np.uint8:
+            return img
+        if np.issubdtype(img.dtype, np.floating):
+            # try to infer range; default to clipping to [0,255]
+            mn, mx = float(np.nanmin(img)), float(np.nanmax(img))
+            if mn >= -1.0 and mx <= 1.0:
+                # could be [-1,1] or [0,1]; map smartly
+                if mn >= 0.0:
+                    img = (img * 255.0)
+                else:
+                    img = (img * 127.5 + 127.5)
+            else:
+                # unknown scale; just clip
+                img = img
+            img = np.clip(img, 0, 255).round().astype(np.uint8)
+            return img
+        # integers or others
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def _from_numpy_cfirst(self, img_hwc: np.ndarray, backend: str):
+        """Convert (H, W, C) uint8 back to (C, H, W) in the original backend."""
+        chw = np.transpose(img_hwc, (2, 0, 1))  # (C, H, W)
+        if backend == "torch":
+            return torch.from_numpy(chw)  # uint8 tensor
+        if backend == "jax":
+            return jnp.asarray(chw, dtype=jnp.uint8)
+        return chw  # numpy
 
 
 @dataclasses.dataclass(frozen=True)
@@ -416,16 +528,18 @@ def apply_tree(
     selector = flatten_dict(selector)
 
     def transform(k: str, v: T) -> T:
+        # direct match
         if k in selector:
             return fn(v, selector[k])
+        # handle action <-> actions alias
+        if k.endswith("actions") and k[:-1] in selector:
+            return fn(v, selector[k[:-1]])
+        if k.endswith("action") and (k + "s") in selector:
+            return fn(v, selector[k + "s"])
         return v
 
-    if strict:
-        for k in selector:
-            if k not in tree:
-                raise ValueError(f"Selector key {k} not found in tree")
-
     return unflatten_dict({k: transform(k, v) for k, v in tree.items()})
+
 
 
 def pad_to_dim(x: np.ndarray, target_dim: int, axis: int = -1) -> np.ndarray:
